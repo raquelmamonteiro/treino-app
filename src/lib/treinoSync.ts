@@ -4,12 +4,38 @@ import { getSupabase, isSupabaseConfigured } from "./supabase";
 export const TREINO_SK = "raquel-treino-v7";
 const META_KEY = `${TREINO_SK}-meta`;
 
+/** Registo semanal de corpo — foto opcional (data URL), medidas e estimativas gravadas no momento. */
+export type BodyWeeklyEntry = {
+  date: string;
+  photoDataUrl?: string | null;
+  pesoKg?: number | null;
+  /** Dobras cutâneas (mm): Jackson & Pollock 3 sítios mulheres */
+  dobraTricepsMm?: number | null;
+  dobraSuprailiacaMm?: number | null;
+  dobraCoxaMm?: number | null;
+  /** Fita métrica (cm) */
+  cinturaCm?: number | null;
+  quadrilCm?: number | null;
+  bracoCm?: number | null;
+  coxaCm?: number | null;
+  /** Opcional — fórmula Navy (com altura no perfil) */
+  pescocoCm?: number | null;
+  /** Calculado ao guardar */
+  bfJacksonPct?: number | null;
+  bfNavyPct?: number | null;
+  gorduraKg?: number | null;
+  magroKg?: number | null;
+};
+
 export type TreinoData = {
   sd: string;
   qi: number;
   ew: Record<string, number>;
   log: unknown[];
   ach: string[];
+  /** Idade e altura para JP e Navy */
+  profile?: { age: number; heightCm: number };
+  bodyWeekly?: BodyWeeklyEntry[];
 };
 
 function td(): string {
@@ -18,7 +44,16 @@ function td(): string {
 }
 
 export function initTreinoData(): TreinoData {
-  return { sd: td(), qi: 0, ew: {}, log: [], ach: [] };
+  return { sd: td(), qi: 0, ew: {}, log: [], ach: [], profile: { age: 30, heightCm: 165 }, bodyWeekly: [] };
+}
+
+/** Garante campos novos em dados antigos ou parciais. */
+export function normalizeTreinoData(d: TreinoData): TreinoData {
+  return {
+    ...d,
+    profile: d.profile?.age && d.profile?.heightCm ? d.profile : { age: 30, heightCm: 165 },
+    bodyWeekly: Array.isArray(d.bodyWeekly) ? d.bodyWeekly : [],
+  };
 }
 
 function isEmptyState(d: TreinoData | null | undefined): boolean {
@@ -65,7 +100,7 @@ export async function loadTreinoState(): Promise<{ data: TreinoData; session: im
   const sb = getSupabase();
 
   if (!sb || !isSupabaseConfigured()) {
-    if (local.data) return { data: local.data, session: null };
+    if (local.data) return { data: normalizeTreinoData(local.data), session: null };
     const fresh = initTreinoData();
     await writeLocal(fresh, Date.now());
     return { data: fresh, session: null };
@@ -75,7 +110,7 @@ export async function loadTreinoState(): Promise<{ data: TreinoData; session: im
   const session = sessionData.session;
 
   if (!session) {
-    if (local.data) return { data: local.data, session: null };
+    if (local.data) return { data: normalizeTreinoData(local.data), session: null };
     const fresh = initTreinoData();
     await writeLocal(fresh, Date.now());
     return { data: fresh, session: null };
@@ -89,7 +124,7 @@ export async function loadTreinoState(): Promise<{ data: TreinoData; session: im
 
   if (error) {
     console.warn("[treino] select:", error.message);
-    if (local.data) return { data: local.data, session };
+    if (local.data) return { data: normalizeTreinoData(local.data), session };
     const fresh = initTreinoData();
     await writeLocal(fresh, Date.now());
     return { data: fresh, session };
@@ -100,29 +135,33 @@ export async function loadTreinoState(): Promise<{ data: TreinoData; session: im
 
   if (!row || !remotePayload || isEmptyState(remotePayload)) {
     if (local.data && !isEmptyState(local.data)) {
-      await upsertRemote(session.user.id, local.data);
-      await writeLocal(local.data, Date.now());
-      return { data: local.data, session };
+      const merged = normalizeTreinoData(local.data);
+      await upsertRemote(session.user.id, merged);
+      await writeLocal(merged, Date.now());
+      return { data: merged, session };
     }
-    const fresh = local.data && !isEmptyState(local.data) ? local.data : initTreinoData();
+    const fresh = local.data && !isEmptyState(local.data) ? normalizeTreinoData(local.data) : initTreinoData();
     await upsertRemote(session.user.id, fresh);
     await writeLocal(fresh, Date.now());
     return { data: fresh, session };
   }
 
   if (!local.data || local.savedAt === 0) {
-    await writeLocal(remotePayload, remoteTime);
-    return { data: remotePayload, session };
+    const merged = normalizeTreinoData(remotePayload);
+    await writeLocal(merged, remoteTime);
+    return { data: merged, session };
   }
 
   if (remoteTime > local.savedAt) {
-    await writeLocal(remotePayload, remoteTime);
-    return { data: remotePayload, session };
+    const merged = normalizeTreinoData(remotePayload);
+    await writeLocal(merged, remoteTime);
+    return { data: merged, session };
   }
 
-  await upsertRemote(session.user.id, local.data);
-  await writeLocal(local.data, Date.now());
-  return { data: local.data, session };
+  const mergedLocal = normalizeTreinoData(local.data);
+  await upsertRemote(session.user.id, mergedLocal);
+  await writeLocal(mergedLocal, Date.now());
+  return { data: mergedLocal, session };
 }
 
 /** Persiste local + nuvem (se logado). */
