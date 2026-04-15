@@ -11,8 +11,29 @@ body,
   margin: 0;
 }
 
+:root[data-theme="light"],
+html[data-theme="light"] {
+  --app-bg: #f4f0ff;
+  --text: #1a1528;
+  --muted: #5c4d7a;
+  --card: #ffffff;
+  --card2: #ebe4f7;
+  --border: #dcd6ec;
+}
+
+:root[data-theme="dark"],
+html[data-theme="dark"] {
+  --app-bg: #0c0a14;
+  --text: #ede9f7;
+  --muted: #6b6280;
+  --card: #13101e;
+  --card2: #161321;
+  --border: #1a1528;
+}
+
 body {
-  background: #0c0a14;
+  background: var(--app-bg, #0c0a14);
+  color: var(--text, #ede9f7);
 }
 
 @keyframes spin {

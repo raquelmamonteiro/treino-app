@@ -3,9 +3,9 @@ import { getSupabase, isSupabaseConfigured, getSupabaseConfigProblem, formatSupa
 import { loadTreinoState, persistTreinoData, initTreinoData } from "./lib/treinoSync";
 import type { BodyWeeklyEntry } from "./lib/treinoSync";
 import { BodyCompositionView } from "./components/BodyCompositionView";
-
-/** Peso “resumo” para progressão: número antigo ou última série do log novo */
-function weightFromLogVal(v){if(v===undefined||v===null)return undefined;if(typeof v==="number"&&!isNaN(v))return v;if(typeof v==="object"&&v!==null&&Array.isArray(v.kg)){const k=v.kg.filter(x=>typeof x==="number"&&!isNaN(x));if(k.length)return k[k.length-1];}return undefined;}
+import { WorkoutRunner } from "./components/WorkoutRunner";
+import { buildDoneSummary, progressGymTip, weightFromLogVal, type DoneSummary } from "./lib/workoutMath";
+import { clearWorkoutSession, workoutSessionSignature } from "./lib/workoutSessionStorage";
 
 /** Conta treinos de ginásio (fila principal ou rápido Smith/crossover) — não inclui “casa”. */
 function gymSessions(l){return(l||[]).filter(e=>e.type==="workout"||e.type==="quick").length;}
@@ -187,7 +187,6 @@ function shiftMonthStr(ym,dir){const[y,m]=ym.split("-").map(Number);const d=new 
 function gLvl(xp){return Math.floor(xp/500)+1;}
 function xpFor(l){return(l-1)*500;}
 function xpN(xp){return xpFor(gLvl(xp)+1)-xp;}
-function gProg(id,log,cw){const ws=[];log.forEach(e=>{if((e.type==="workout"||e.type==="quick"||e.type==="home")&&e.w?.[id]!==undefined){const x=weightFromLogVal(e.w[id]);if(x!==undefined)ws.push(x);}});if(ws.length<2)return{tip:"Continue treinando",color:"#6b6280",icon:"📊"};const l3=ws.slice(-3);if(l3.every(w=>w===l3[0])&&l3.length>=2){const u=["rosca-mm","triceps-polia","lat-raise","front-raise","desenv","face-pull-t","face-pull-sex","q-cross-tri","q-cross-fly","q-supino-smith"].includes(id);return{tip:`${l3.length}x mesma carga → tente ${cw+(u?1.25:2.5)}kg`,color:"#22c55e",icon:"⬆️"};}if(ws[ws.length-1]>ws[ws.length-2])return{tip:"Boa progressão! Mantenha.",color:"#a78bfa",icon:"✨"};if(ws[ws.length-1]<ws[ws.length-2])return{tip:"Carga caiu. Dor? Ok. Senão, recupere.",color:"#f59e0b",icon:"⚠️"};return{tip:"Mantendo — foque na execução.",color:"#6b6280",icon:"👌"};}
 
 /** Segundos inferidos de textos do protocolo: "5 min", "30s", "2x30s", etc. */
 function parseSecondsFromText(t){
@@ -273,6 +272,10 @@ export default function App(){
   const[runTimeStr,sRunTimeStr]=useState("");
   const[runFeel,sRunFeel]=useState(RUN_FEEL[0]);
   const[histCalYM,sHistCalYM]=useState(()=>td().slice(0,7));
+  const[rMax,sRMax]=useState(0);
+  const[wqShift,sWqShift]=useState(0);
+  const[theme,setTheme]=useState<"dark"|"light">(()=>(typeof window!=="undefined"&&localStorage.getItem("treino-theme")==="light"?"light":"dark"));
+  const[doneSummary,setDoneSummary]=useState<DoneSummary|null>(null);
   const tRef=useRef(null);
   const prevAch=useRef(new Set());
 
@@ -280,7 +283,8 @@ export default function App(){
   useEffect(()=>{void load();},[load]);
   useEffect(()=>{const sb=getSupabase();if(!sb)return;const{data:{subscription}}=sb.auth.onAuthStateChange(async(event,session)=>{setAuthUser(session?.user?{id:session.user.id,email:session.user.email??undefined}:null);if(event==="TOKEN_REFRESHED"||event==="USER_UPDATED")return;if(!session?.user)return;try{const{data}=await loadTreinoState();setData(data);prevAch.current=new Set(data.ach||[]);if(event==="SIGNED_IN"||event==="INITIAL_SESSION"){try{await persistTreinoData(data);}catch(e){console.warn("[treino] sync após auth:",e);}}}catch(e){console.warn(e);}});return()=>subscription.unsubscribe();},[]);
   useEffect(()=>{const onVis=()=>{if(document.visibilityState==="visible")void getSupabase()?.auth.getSession();};document.addEventListener("visibilitychange",onVis);return()=>document.removeEventListener("visibilitychange",onVis);},[]);
-  useEffect(()=>{if(rId&&rL>0){tRef.current=setTimeout(()=>sRL(t=>t-1),1000);return()=>clearTimeout(tRef.current);}if(rL===0&&rId)sRId(null);},[rId,rL]);
+  useEffect(()=>{if(rId&&rL>0){tRef.current=setTimeout(()=>sRL(t=>t-1),1000);return()=>clearTimeout(tRef.current);}if(rL===0&&rId){sRId(null);sRMax(0);}},[rId,rL]);
+  useEffect(()=>{document.documentElement.dataset.theme=theme;try{localStorage.setItem("treino-theme",theme);}catch(e){}const m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute("content",theme==="light"?"#ede9fe":"#0c0a14");},[theme]);
 
   async function save(nd){const s=cStreak(nd.log||[]);const ul=ALL_ACHIEV.filter(a=>a.check(nd.log||[],s)).map(a=>a.id);const nw=ul.filter(id=>!prevAch.current.has(id));nd.ach=ul;if(nw.length>0){setNewAch(ALL_ACHIEV.find(x=>x.id===nw[0]));setTimeout(()=>setNewAch(null),3500);}prevAch.current=new Set(ul);setData(nd);try{await persistTreinoData(nd);}catch(e){}}
 
@@ -302,6 +306,7 @@ export default function App(){
 
   async function complete(wo,weights,fb,logType="workout"){
     const skipped=fb?.skipped?.length?fb.skipped:[];
+    setDoneSummary(buildDoneSummary(wo,weights,skipped,data.log||[],td()));
     const ewNext={...(data.ew||{})};
     const wLog={};
     wo.exercises.forEach(ex=>{
@@ -325,6 +330,9 @@ export default function App(){
   async function delBodyEntry(d:string){await save({...data,bodyWeekly:(data.bodyWeekly||[]).filter(x=>x.date!==d)});}
   async function reset(){const f=initTreinoData();f.ew=data?.ew||{};f.profile=data?.profile;f.bodyWeekly=data?.bodyWeekly||[];await save(f);setView("home");}
 
+  function startRest(id,sec){sRId(id);sRL(sec);sRMax(sec);}
+  function clearRest(){sRId(null);sRL(0);sRMax(0);}
+
   if(loading)return<div style={S.lw}><div style={S.spin}/></div>;
   if(!data)return null;
   const wo=cur();const streak=cStreak(data.log||[]);const xp=getXP(data.log||[]);const lvl=gLvl(xp);
@@ -333,16 +341,84 @@ export default function App(){
 
   const ap=newAch?<div style={S.ap}><span style={{fontSize:24}}>{newAch.icon}</span><div><div style={{fontWeight:800,fontSize:13,color:"#fff"}}>{newAch.title}</div><div style={{fontSize:10,color:"#ffffffaa"}}>{newAch.desc}</div></div></div>:null;
 
-  if(view==="done")return(<div style={S.root}>{ap}<div style={S.ds}><div style={S.cb}>✓</div><h2 style={S.dh}>Treino concluído!</h2><div style={S.dx}>+{doneXp} XP</div><p style={S.dp}>Próximo: <b>{WP[data.qi%WP.length]?.label}</b></p>{streak>=2&&<div style={S.sb}>🔥 {streak} dias seguidos!</div>}<button style={S.bp} onClick={()=>setView("home")}>Voltar</button></div></div>);
+  if(view==="done")return(<div style={S.root}>{ap}<div style={S.ds}><div style={S.cb}>✓</div><h2 style={S.dh}>Treino concluído!</h2><div style={S.dx}>+{doneXp} XP</div>{doneSummary&&<><p style={{...S.dp,marginTop:8}}><b>{doneSummary.totalSets}</b> séries · volume total <b>{doneSummary.volume.toLocaleString("pt-BR")} kg·reps</b></p>{doneSummary.prs.length>0&&<div style={{textAlign:"left",maxWidth:320,margin:"12px auto",fontSize:12,color:"#b0a8c4"}}><div style={{fontWeight:800,marginBottom:6}}>PRs do dia</div>{doneSummary.prs.map((p,i)=><div key={i}>• {p}</div>)}</div>}{doneSummary.prevVolume!=null&&doneSummary.prevDate&&<p style={{fontSize:12,color:"#6b6280",marginTop:8,lineHeight:1.5}}>vs sessão anterior neste treino ({String(doneSummary.prevDate).slice(0,10)}): volume {doneSummary.prevVolume.toLocaleString("pt-BR")} → <b style={{color:doneSummary.volume>=doneSummary.prevVolume?"#22c55e":"#f59e0b"}}>{doneSummary.volume.toLocaleString("pt-BR")}</b></p>}</>}<p style={S.dp}>Próximo: <b>{WP[data.qi%WP.length]?.label}</b></p>{streak>=2&&<div style={S.sb}>🔥 {streak} dias seguidos!</div>}<button style={S.bp} onClick={()=>{setDoneSummary(null);setView("home");}}>Voltar</button></div></div>);
 
-  if(view==="workout"){const baseWo=woAlt?(woAlt.k==="quick"?QUICK[woAlt.i]:HOME[woAlt.i]):wo;if(!baseWo)return null;const wSession=!woAlt&&quickRun?buildQuickWorkout(baseWo):baseWo;const logT=woAlt?(woAlt.k==="quick"?"quick":"home"):"workout";return<WO wo={wSession} gw={gw} wH={wH} onDone={(w,weights,fb)=>void complete(w,weights,fb,logT)} onBack={()=>{setQuickRun(false);setWoAlt(null);setView("home");}} sP={sP} sSP={sSP} rId={rId} sRId={sRId} rL={rL} sRL={sRL} log={data.log||[]} popup={ap} fbNote={fbNote} setFbNote={setFbNote} fbTags={fbTags} setFbTags={setFbTags}/>;}
-  if(view==="qd"&&selQ!==null){const wq=WP[selQ];const wSession=quickRun?buildQuickWorkout(wq):wq;return<WO wo={wSession} gw={gw} wH={wH} onDone={complete} onBack={()=>{setQuickRun(false);setView("queue");}} sP={sP} sSP={sSP} rId={rId} sRId={sRId} rL={rL} sRL={sRL} ro={selQ!==(data.qi%WP.length)} log={data.log||[]} popup={ap} fbNote={fbNote} setFbNote={setFbNote} fbTags={fbTags} setFbTags={setFbTags}/>;}
+  if(view==="workout"){
+    const baseWo=woAlt?(woAlt.k==="quick"?QUICK[woAlt.i]:HOME[woAlt.i]):WP[((data.qi||0)+wqShift+WP.length*20)%WP.length];
+    if(!baseWo)return null;
+    const wSession=!woAlt&&quickRun?buildQuickWorkout(baseWo):baseWo;
+    const logT=woAlt?(woAlt.k==="quick"?"quick":"home"):"workout";
+    const pk=woAlt?woAlt.k==="quick"?`alt-q-${woAlt.i}`:`alt-h-${woAlt.i}`:quickRun?`hm-q-${wqShift}`:`hm-${wqShift}`;
+    const pks=workoutSessionSignature(wSession,!!wSession.quick,pk);
+    return(
+      <WorkoutRunner
+        key={pks}
+        wo={wSession}
+        gw={gw}
+        wH={wH}
+        onDone={(w,weights,fb)=>void complete(w,weights,fb,logT)}
+        onBack={()=>{clearWorkoutSession();setQuickRun(false);setWoAlt(null);setView("home");}}
+        sP={sP}
+        sSP={sSP}
+        ro={false}
+        log={data.log||[]}
+        popup={ap}
+        fbNote={fbNote}
+        setFbNote={setFbNote}
+        fbTags={fbTags}
+        setFbTags={setFbTags}
+        rId={rId}
+        rL={rL}
+        rMax={rMax}
+        startRest={startRest}
+        clearRest={clearRest}
+        getExInfo={exInfo}
+        persistKey={pk}
+        filaSwipe={!woAlt?{onDelta:(d)=>sWqShift(s=>(s+d+WP.length)%WP.length)}:null}
+        S={S}
+      />
+    );
+  }
+  if(view==="qd"&&selQ!==null){
+    const wq=WP[selQ];
+    const wSession=quickRun?buildQuickWorkout(wq):wq;
+    const pk=`qd-${selQ}`;
+    const pks=workoutSessionSignature(wSession,!!wSession.quick,pk);
+    return(
+      <WorkoutRunner
+        key={pks}
+        wo={wSession}
+        gw={gw}
+        wH={wH}
+        onDone={complete}
+        onBack={()=>{clearWorkoutSession();setQuickRun(false);setView("queue");}}
+        sP={sP}
+        sSP={sSP}
+        ro={selQ!==(data.qi%WP.length)}
+        log={data.log||[]}
+        popup={ap}
+        fbNote={fbNote}
+        setFbNote={setFbNote}
+        fbTags={fbTags}
+        setFbTags={setFbTags}
+        rId={rId}
+        rL={rL}
+        rMax={rMax}
+        startRest={startRest}
+        clearRest={clearRest}
+        getExInfo={exInfo}
+        persistKey={pk}
+        filaSwipe={{onDelta:(d)=>sSelQ(q=>(q===null?q:(q+d+WP.length)%WP.length))}}
+        S={S}
+      />
+    );
+  }
 
   if(view==="queue")return(<div style={S.root}>{ap}<Hd t="Fila de Treinos" back={()=>setView("home")}/><div style={S.pd}><p style={S.hint}>Só avança quando concluir o treino atual.</p>{WP.map((w,i)=>{const rel=i-(data.qi%WP.length);const ic=rel===0;const past=rel<0;const estQ=estimateWorkoutMinutes(buildQuickWorkout(w));return(<div key={w.id} style={{marginBottom:10}}><div style={{...S.qC,borderLeftColor:ic?"#a78bfa":past?"#22c55e44":"#1f1b2e",opacity:past?0.4:1,cursor:"pointer"}} onClick={()=>{sSelQ(i);setQuickRun(false);setWoAlt(null);setView("qd");}}><div style={S.qL}><div style={{...S.qD,background:ic?"#a78bfa":past?"#22c55e":"#2a2535"}}>{past?"✓":w.emoji}</div><div><div style={S.qN}>{w.label}</div><div style={S.qF}>{w.focus}</div></div></div>{ic&&<span style={S.nb}>PRÓXIMO</span>}<span style={S.ch}>›</span></div>{!past&&<button type="button" style={S.qQuick} onClick={e=>{e.stopPropagation();sSelQ(i);setQuickRun(true);setWoAlt(null);setView("qd");}}>⚡ Versão rápida (~{estQ} min)</button>}</div>);})}</div></div>);
 
   if(view==="history"){const sorted=[...(data.log||[])].map((e,i)=>({...e,_i:i})).reverse();const[cy,cm]=histCalYM.split("-").map(Number);const cells=calendarCells(cy,cm);const active=activeDaysUnion(data.log||[],data.bodyWeekly||[]);const today=td();const monthTitle=new Date(cy,cm-1,15).toLocaleDateString("pt-BR",{month:"long",year:"numeric",timeZone:TZ_BR});return(<div style={S.root}>{ap}<Hd t="Histórico" back={()=>setView("home")}/><div style={S.pd}><div style={S.calWrap}><div style={S.calNav}><button type="button" style={S.calNavBtn} aria-label="Mês anterior" onClick={()=>sHistCalYM(m=>shiftMonthStr(m,-1))}>‹</button><span style={S.calTitle}>{monthTitle}</span><button type="button" style={S.calNavBtn} aria-label="Próximo mês" onClick={()=>sHistCalYM(m=>shiftMonthStr(m,1))}>›</button></div><div style={S.calWeekRow}>{CAL_WD.map(w=><div key={w} style={S.calWD}>{w}</div>)}</div><div style={S.calGrid}>{cells.map((day,idx)=>{if(day===null)return<div key={`e${idx}`} style={S.calCellEmpty}/>;const iso=`${cy}-${String(cm).padStart(2,"0")}-${String(day).padStart(2,"0")}`;const on=active.has(iso);const isToday=iso===today;return<div key={iso} style={{...S.calCell,...(on?S.calCellOn:{}),...(isToday&&!on?S.calCellToday:{}),...(isToday&&on?S.calCellTodayOn:{})}}>{day}</div>;})}</div><p style={S.calLegend}>Roxo = dia com registo (treino, corpo/medidas, corrida, mobilidade ou outra atividade)</p></div>{sorted.length===0&&<p style={S.em}>Nenhum registro.</p>}{sorted.map(e=>{const ty=e.type;const bc=ty==="workout"?"#a78bfa":ty==="quick"?"#f59e0b":ty==="home"?"#14b8a6":ty==="free"?"#f59e0b":ty==="run"?"#06b6d4":"#6b7280";const tl=ty==="workout"?"TREINO":ty==="quick"?"RÁPIDO":ty==="home"?"CASA":ty==="free"?"ATIVIDADE":ty==="run"?"CORRIDA":"DESCANSO";const tc=bc;return(<div key={e._i} style={{...S.hC,borderLeftColor:bc}}><div style={S.hT}><span style={S.hD}>{fd(e.date)}</span><div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:9,fontWeight:800,letterSpacing:1,color:tc}}>{tl}</span><button style={S.del} onClick={()=>{if(confirm("Excluir este registro?"))delLog(e._i);}}>✕</button></div></div>{ty==="run"?<><div style={{fontSize:14,fontWeight:700}}>Corrida · {Number(e.km||0).toLocaleString("pt-BR",{minimumFractionDigits:0,maximumFractionDigits:2})} km</div><div style={{fontSize:11,color:"#6b6280",marginTop:2}}>{formatDurationSec(e.durSec)} · pace {formatPaceMinPerKm(e.paceMinPerKm)}</div>{e.feel&&<div style={{fontSize:11,color:"#22d3d8",marginTop:4}}>{e.feel}</div>}</>:<><div style={{fontSize:14,fontWeight:700}}>{e.label||e.desc}</div>{e.dur&&<div style={{fontSize:11,color:"#6b6280",marginTop:2}}>{e.dur}</div>}</>}{e.skipped?.length>0&&<div style={{fontSize:10,color:"#f59e0b",marginTop:4}}>⊘ Não realizados: {e.skipped.map(id=>exNameById(id)).join(" · ")}</div>}{e.fb&&<div style={{fontSize:11,color:"#a78bfa",marginTop:4,fontStyle:"italic"}}>{e.fb.tags?.join(" ")} {e.fb.note&&`— ${e.fb.note}`}</div>}{e.w&&Object.keys(e.w).length>0&&<div style={S.hTg}>{Object.entries(e.w).map(([k,v])=>{const t=formatLogEntryWeight(k,v);return t?<span key={k} style={S.tg}>{t}</span>:null;}).filter(Boolean)}</div>}</div>);})}</div></div>);}
 
-  if(view==="progress"){const allEx=[...new Map([...WP,...QUICK].flatMap(w=>w.exercises).map(e=>[e.id,e])).values()];return(<div style={S.root}>{ap}<Hd t="Progressão" back={()=>setView("home")}/><div style={S.pd}>{allEx.map(ex=>{const h=wH(ex.id);if(!h.length)return null;const last=h[h.length-1].weight;const diff=last-h[0].weight;const mx=Math.max(...h.map(x=>x.weight),1);const p=gProg(ex.id,data.log||[],last);return(<div key={ex.id} style={S.pC}><div style={S.pN}>{ex.name}</div><div style={S.pR}><span style={S.pW}>{last}kg</span>{diff!==0&&<span style={{fontSize:12,fontWeight:800,color:diff>0?"#22c55e":"#ef4444"}}>{diff>0?"+":""}{diff}kg</span>}<span style={{fontSize:10,color:"#4a4260"}}>{h.length} sessões</span></div><div style={S.pB}>{h.map((x,j)=><div key={j} style={{width:7,borderRadius:3,minHeight:3,height:`${Math.max(15,(x.weight/mx)*100)}%`,background:j===h.length-1?"#a78bfa":"#4a4458",transition:"height .3s"}}/>)}</div><div style={{fontSize:12,marginTop:10,fontWeight:600,color:p.color}}>{p.icon} {p.tip}</div></div>);})}</div></div>);}
+  if(view==="progress"){const allEx=[...new Map([...WP,...QUICK].flatMap(w=>w.exercises).map(e=>[e.id,e])).values()];return(<div style={S.root}>{ap}<Hd t="Progressão" back={()=>setView("home")}/><div style={S.pd}>{allEx.map(ex=>{const h=wH(ex.id);if(!h.length)return null;const last=h[h.length-1].weight;const diff=last-h[0].weight;const mx=Math.max(...h.map(x=>x.weight),1);const p=progressGymTip(ex.id,data.log||[],last);return(<div key={ex.id} style={S.pC}><div style={S.pN}>{ex.name}</div><div style={S.pR}><span style={S.pW}>{last}kg</span>{diff!==0&&<span style={{fontSize:12,fontWeight:800,color:diff>0?"#22c55e":"#ef4444"}}>{diff>0?"+":""}{diff}kg</span>}<span style={{fontSize:10,color:"#4a4260"}}>{h.length} sessões</span></div><div style={S.pB}>{h.map((x,j)=><div key={j} style={{width:7,borderRadius:3,minHeight:3,height:`${Math.max(15,(x.weight/mx)*100)}%`,background:j===h.length-1?"#a78bfa":"#4a4458",transition:"height .3s"}}/>)}</div><div style={{fontSize:12,marginTop:10,fontWeight:600,color:p.color}}>{p.icon} {p.tip}</div></div>);})}</div></div>);}
 
   if(view==="achiev")return(<div style={S.root}>{ap}<Hd t="Conquistas" back={()=>setView("home")}/><div style={S.pd}><p style={{...S.hint,marginTop:0}}>Treino & consistência</p>{ACHIEV.map(a=>{const u=(data.ach||[]).includes(a.id);return(<div key={a.id} style={{...S.aC,opacity:u?1:.35}}><span style={{fontSize:28}}>{a.icon}</span><div><div style={{fontWeight:800,fontSize:14}}>{a.title}</div><div style={{fontSize:11,color:"#6b6280",marginTop:1}}>{a.desc}</div></div>{u&&<span style={{color:"#22c55e",fontWeight:800,fontSize:18,marginLeft:"auto"}}>✓</span>}</div>);})}<p style={{...S.hint,marginTop:20}}>Corrida</p>{RUN_ACHIEV.map(a=>{const u=(data.ach||[]).includes(a.id);return(<div key={a.id} style={{...S.aC,opacity:u?1:.35,borderColor:"#06b6d433"}}><span style={{fontSize:28}}>{a.icon}</span><div><div style={{fontWeight:800,fontSize:14}}>{a.title}</div><div style={{fontSize:11,color:"#6b6280",marginTop:1}}>{a.desc}</div></div>{u&&<span style={{color:"#22c55e",fontWeight:800,fontSize:18,marginLeft:"auto"}}>✓</span>}</div>);})}</div></div>);
 
@@ -361,7 +437,7 @@ export default function App(){
   const estAltHome=HOME.map(h=>estimateWorkoutMinutes(h));
   const supabaseCfgWarn=getSupabaseConfigProblem();
   return(<div style={S.root}>{ap}
-    <div style={S.top}><div><h1 style={S.logo}>TREINO</h1><p style={S.date}>{formatHomeDate()}</p>{data.sd&&<p style={S.dateSub}>Semanas desde o início: <b>{weeks()}</b> · primeiro dia: {fd(data.sd)}</p>}</div><div style={S.tR}>{streak>0&&<div style={S.sC}>🔥 {streak}</div>}<div style={S.badge}>Ciclo {cycle()} · {pos()}/5</div></div></div>
+    <div style={S.top}><div><h1 style={S.logo}>TREINO</h1><p style={S.date}>{formatHomeDate()}</p>{data.sd&&<p style={S.dateSub}>Semanas desde o início: <b>{weeks()}</b> · primeiro dia: {fd(data.sd)}</p>}</div><div style={S.tR}><button type="button" style={{...S.bk,width:"auto",padding:"0 12px",fontSize:16}} onClick={()=>setTheme(t=>t==="dark"?"light":"dark")} title={theme==="dark"?"Tema claro":"Tema escuro"}>{theme==="dark"?"☀️":"🌙"}</button>{streak>0&&<div style={S.sC}>🔥 {streak}</div>}<div style={S.badge}>Ciclo {cycle()} · {pos()}/5</div></div></div>
     <div style={S.xW}><div style={S.xR}><span style={S.xL}>Nível {lvl}</span><span style={S.xT}>{xpN(xp)} XP → nível {lvl+1}</span></div><div style={S.xBg}><div style={{...S.xF,width:`${Math.min(xpPct,100)}%`}}/></div></div>
     {supabaseCfgWarn&&<div style={S.syncWarn}><span style={{fontSize:18}}>⚠️</span><p style={S.syncWarnT}>{supabaseCfgWarn}</p></div>}
     {isSupabaseConfigured()&&<div style={S.syncBox}>{authUser?(<><div style={S.syncRow}><span style={S.syncOk}>☁️ Conta ligada</span><span style={S.syncEm}>{authUser.email||"—"}</span><button type="button" style={S.syncOut} onClick={async()=>{setAuthHint("");await getSupabase()?.auth.signOut();}}>Sair</button></div><p style={S.syncSub}>A sessão fica guardada neste aparelho. Ao abrir o app, sincroniza automaticamente com a nuvem.</p></>):(!authOpen?<><button type="button" style={S.syncBtn} onClick={()=>{setAuthOpen(true);setAuthHint("");}}>☁️ Ligar conta (uma vez)</button><p style={S.syncSub}>Depois do primeiro login com o e-mail, não precisa repetir — abre já ligada e envia os dados ao abrir.</p></>:<div style={S.syncForm}><input type="email" style={S.syncInp} placeholder="Seu e-mail" value={authEmail} onChange={e=>setAuthEmail(e.target.value)} autoComplete="email"/><button type="button" style={S.syncSend} onClick={async()=>{const sb=getSupabase();if(!sb||!authEmail.trim())return;setAuthHint("");const redirect=`${window.location.origin}${window.location.pathname||""}`;try{const{error}=await sb.auth.signInWithOtp({email:authEmail.trim(),options:{emailRedirectTo:redirect}});if(error)setAuthHint(formatSupabaseNetworkError(error));else setAuthHint("Link enviado — verifique o e-mail (e a caixa de spam).");}catch(e){setAuthHint(formatSupabaseNetworkError(e));}}}>Enviar link mágico</button><button type="button" style={S.syncMini} onClick={()=>setAuthOpen(false)}>Fechar</button>{authHint&&<p style={S.syncHint}>{authHint}</p>}</div>)}</div>}
@@ -370,14 +446,14 @@ export default function App(){
     <div style={S.sec}><h2 style={S.sT}>Próximo treino</h2>
       <div style={S.nC}>
         <div style={S.nT}><div><div style={{fontSize:28,marginBottom:4}}>{wo.emoji}</div><div style={S.nL}>{wo.label}</div><div style={S.nF}>{wo.focus}</div><div style={S.nQ}>Treino {pos()} de 5</div></div><div style={S.nCt}>{wo.exercises.length} ex.</div></div>
-        <button style={{...S.bp,marginTop:20}} onClick={()=>{setFbNote("");setFbTags([]);setWoAlt(null);setQuickRun(false);setView("workout");}}>Treino completo (~{estFull} min)</button>
-        <button type="button" style={{...S.bQuick,marginTop:10}} onClick={()=>{setFbNote("");setFbTags([]);setWoAlt(null);setQuickRun(true);setView("workout");}}>⚡ Treino rápido (~{estQuick} min)</button>
+        <button style={{...S.bp,marginTop:20}} onClick={()=>{setFbNote("");setFbTags([]);setWoAlt(null);setQuickRun(false);sWqShift(0);setView("workout");}}>Treino completo (~{estFull} min)</button>
+        <button type="button" style={{...S.bQuick,marginTop:10}} onClick={()=>{setFbNote("");setFbTags([]);setWoAlt(null);setQuickRun(true);sWqShift(0);setView("workout");}}>⚡ Treino rápido (~{estQuick} min)</button>
         <p style={S.quickHint}>Tempo completo (~{estFull} min): inclui aquecimento, todas as séries (execução + descanso), deslocamento entre exercícios, finalizador HIIT quando existir e bloco postural.</p>
         <p style={S.quickHint}>Rápido (~{estQuick} min): menos séries, descansos mais curtos, sem finalizador HIIT e menos postural — mesmos exercícios e cargas.</p>
         <h2 style={{...S.sT,marginTop:20}}>Alternativas</h2>
         <p style={{...S.quickHint,marginTop:0}}>Rápidos (~30 min) substituem o próximo treino da fila — foco igual ao dia, menos volume. Em casa são extra e não avançam a fila.</p>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(2, 1fr)",gap:8,marginBottom:8}}>{QUICK.map((q,i)=>(<div key={q.id} style={{background:"#161321",borderRadius:16,padding:12,border:"1px solid #f59e0b33",cursor:"pointer",minWidth:0}} onClick={()=>{setFbNote("");setFbTags([]);setWoAlt({k:"quick",i});setQuickRun(false);setView("workout");}}><div style={{fontSize:20,marginBottom:4}}>{q.emoji}</div><div style={{fontWeight:800,fontSize:11,lineHeight:1.25}}>{q.label.replace(/^⚡\s*/,"")}</div><div style={{fontSize:9,color:"#f59e0b",marginTop:4,fontWeight:700}}>Substitui o próximo</div><div style={{fontSize:9,color:"#6b6280",marginTop:2}}>~{estAltQuick[i]} min</div></div>))}</div>
-        <div style={{display:"flex",gap:8}}>{HOME.map((h,i)=>(<div key={h.id} style={{flex:1,background:"#161321",borderRadius:16,padding:12,border:"1px solid #14b8a633",cursor:"pointer",minWidth:0}} onClick={()=>{setFbNote("");setFbTags([]);setWoAlt({k:"home",i});setQuickRun(false);setView("workout");}}><div style={{fontSize:20,marginBottom:4}}>{h.emoji}</div><div style={{fontWeight:800,fontSize:11,lineHeight:1.25}}>{h.label.replace(/^🏠 Casa:\s*/,"")}</div><div style={{fontSize:9,color:"#14b8a6",marginTop:4,fontWeight:700}}>Extra (não substitui)</div><div style={{fontSize:9,color:"#6b6280",marginTop:2}}>~{estAltHome[i]} min</div></div>))}</div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(2, 1fr)",gap:8,marginBottom:8}}>{QUICK.map((q,i)=>(<div key={q.id} style={{background:"#161321",borderRadius:16,padding:12,border:"1px solid #f59e0b33",cursor:"pointer",minWidth:0}} onClick={()=>{setFbNote("");setFbTags([]);setWoAlt({k:"quick",i});setQuickRun(false);sWqShift(0);setView("workout");}}><div style={{fontSize:20,marginBottom:4}}>{q.emoji}</div><div style={{fontWeight:800,fontSize:11,lineHeight:1.25}}>{q.label.replace(/^⚡\s*/,"")}</div><div style={{fontSize:9,color:"#f59e0b",marginTop:4,fontWeight:700}}>Substitui o próximo</div><div style={{fontSize:9,color:"#6b6280",marginTop:2}}>~{estAltQuick[i]} min</div></div>))}</div>
+        <div style={{display:"flex",gap:8}}>{HOME.map((h,i)=>(<div key={h.id} style={{flex:1,background:"#161321",borderRadius:16,padding:12,border:"1px solid #14b8a633",cursor:"pointer",minWidth:0}} onClick={()=>{setFbNote("");setFbTags([]);setWoAlt({k:"home",i});setQuickRun(false);sWqShift(0);setView("workout");}}><div style={{fontSize:20,marginBottom:4}}>{h.emoji}</div><div style={{fontWeight:800,fontSize:11,lineHeight:1.25}}>{h.label.replace(/^🏠 Casa:\s*/,"")}</div><div style={{fontSize:9,color:"#14b8a6",marginTop:4,fontWeight:700}}>Extra (não substitui)</div><div style={{fontSize:9,color:"#6b6280",marginTop:2}}>~{estAltHome[i]} min</div></div>))}</div>
         {todayHasW()&&<p style={{fontSize:11,color:"#a78bfa",marginTop:8,textAlign:"center"}}>Já treinou hoje — pode fazer outro!</p>}
         <div style={S.div}><span style={S.dL}/><span style={S.dT}>ou</span><span style={S.dL}/></div>
         <div style={S.aR}><button style={S.bg} onClick={()=>sShowF(!showF)}>Outra atividade</button><button style={S.bg} onClick={()=>setView("mob")}>Mobilidade</button><button type="button" style={S.bgRun} onClick={()=>setView("run")}>Corrida</button></div>
@@ -388,71 +464,18 @@ export default function App(){
   </div>);
 }
 
-function WO({wo,gw,wH,onDone,onBack,sP,sSP,rId,sRId,rL,sRL,ro,log,popup,fbNote,setFbNote,fbTags,setFbTags}){
-  const[swBySet,sSwBySet]=useState(()=>{const w={};wo.exercises.forEach(e=>{const b=gw(e.id);w[e.id]=Array.from({length:e.sets},()=>b);});return w;});
-  const[srBySet,sSrBySet]=useState(()=>{const r={};wo.exercises.forEach(e=>{r[e.id]=Array.from({length:e.sets},()=>e.reps);});return r;});
-  const[ds,sDs]=useState(()=>{const s={};wo.exercises.forEach(e=>{s[e.id]=0});return s;});
-  const[warmDone,setWarmDone]=useState(false);
-  const[finisherDone,setFinisherDone]=useState(false);
-  const[postDone,setPostDone]=useState(false);
-  const[showFb,setShowFb]=useState(false);
-  const[exModal,setExModal]=useState(null);
-  const[skip,sSkip]=useState(()=>{const o={};wo.exercises.forEach(e=>{o[e.id]=false;});return o;});
-
-  function tick(id,total,rest){if(ro||skip[id])return;sDs(p=>{const c=p[id]||0;const n=c<total?c+1:0;if(n>0&&n<total){sRId(id);sRL(rest);}return{...p,[id]:n};});}
-  function toggleSkip(id){if(ro)return;sSkip(p=>{const nv=!p[id];if(nv)sDs(q=>({...q,[id]:0}));return{...p,[id]:nv};});}
-  const activeEx=wo.exercises.filter(e=>!skip[e.id]);
-  const doneSets=activeEx.reduce((a,e)=>a+(ds[e.id]||0),0);
-  const totalSets=activeEx.reduce((a,e)=>a+e.sets,0);
-  const allSkipped=wo.exercises.length>0&&wo.exercises.every(e=>skip[e.id]);
-  const pct=totalSets>0?(doneSets/totalSets)*100:(allSkipped?100:0);
-  const hasAny=doneSets>0||allSkipped;
-
-  function doFinish(){const skippedIds=wo.exercises.filter(e=>skip[e.id]).map(e=>e.id);const weights={};wo.exercises.forEach(ex=>{if(skip[ex.id])return;weights[ex.id]={kg:swBySet[ex.id]||[],reps:srBySet[ex.id]||[]};});onDone(wo,weights,{tags:fbTags,note:fbNote,skipped:skippedIds});}
-  function toggleFb(t){setFbTags(p=>p.includes(t)?p.filter(x=>x!==t):[...p,t]);}
-  const modalInfo=exModal?exInfo(exModal):undefined;
-  const modalEx=exModal?wo.exercises.find(e=>e.id===exModal):undefined;
-
-  if(showFb)return(<div style={S.root}>{popup}<Hd t="Avaliação do treino" back={()=>setShowFb(false)}/><div style={S.pd}><p style={{fontSize:14,color:"#b0a8c4",marginBottom:16}}>Como foi <b>{wo.label}</b>?</p><div style={S.fbTs}>{FB_OPT.map(t=><button key={t} style={{...S.fbT,background:fbTags.includes(t)?"#a78bfa":"#1a1528",color:fbTags.includes(t)?"#0c0a14":"#b0a8c4"}} onClick={()=>toggleFb(t)}>{t}</button>)}</div><textarea style={S.fbI} placeholder="Observações (opcional)..." value={fbNote} onChange={e=>setFbNote(e.target.value)} rows={3}/><button style={{...S.bp,marginTop:16}} onClick={doFinish}>Salvar e concluir 🎉</button><button style={{...S.bg2,marginTop:10}} onClick={doFinish}>Continuar sem comentários</button></div></div>);
-
-  return(<div style={S.root}>{popup}
-    <Hd t={wo.label} sub={wo.quick?`${wo.focus} · ⚡ Modo rápido (menos séries, descansos curtos)`:wo.focus} back={onBack}/>
-    {wo.quick&&<div style={S.quickStrip}>Prioridade: completar o essencial no menor tempo. Ajuste as cargas se precisar.</div>}
-    <div style={S.wPBg}><div style={{...S.wPF,width:`${pct}%`}}/></div>
-    {rId&&rL>0&&<div style={S.tmr}><span>⏱ <b>{rL}s</b></span><button style={S.tmrS} onClick={()=>{sRId(null);sRL(0);}}>Pular</button></div>}
-    <div style={S.pd}>
-      {wo.warmup?.length>0&&<div style={{...S.blk,borderLeft:warmDone?"3px solid #22c55e":"3px solid transparent"}}><div style={S.blkR} onClick={()=>setWarmDone(!warmDone)}><div style={{...S.chk,background:warmDone?"#22c55e":"#2a2535"}}>{warmDone&&"✓"}</div><div style={S.blkH}>🔥 Aquecimento</div></div>{wo.warmup.map((w,i)=><div key={i} style={S.blkI}>• {w}</div>)}</div>}
-
-      <div style={S.blkH}>💪 Exercícios</div>
-      {wo.exercises.map((ex,i)=>{const sk=skip[ex.id];const fin=!sk&&(ds[ex.id]||0)>=ex.sets;const h=wH(ex.id);const kgs=swBySet[ex.id]||[];const rps=srBySet[ex.id]||[];const cw=kgs.length?kgs[kgs.length-1]:gw(ex.id);const lastW=h.length?h[h.length-1].weight:null;const p=gProg(ex.id,log,cw);const ei=exInfo(ex.id);const bc=sk?"#6b7280":fin?"#22c55e":"#a78bfa";
-        return(<div key={ex.id} style={{...S.eC,borderLeftColor:bc,opacity:sk?0.72:1}}>
-          <div style={S.eT}>{ei?(<button type="button" style={S.eThWrap} onClick={()=>!sk&&setExModal(ex.id)} aria-label={`Ilustração: ${ex.name}`} disabled={sk}><img src={ei.img} alt="" style={{...S.eThImg,filter:sk?"grayscale(0.6)":undefined}} loading="lazy" decoding="async"/><span style={S.eThBadge}>{i+1}</span></button>):(<div style={S.eI} onClick={()=>!sk&&setExModal(ex.id)}>{i+1}</div>)}<div style={{flex:1}}><div style={S.eN}>{ex.name}{sk&&<span style={S.eSkip}> · não feito</span>} <button type="button" style={S.eInfoBt} onClick={()=>setExModal(ex.id)} aria-label="Instruções">📷</button></div><div style={S.eM}>{ex.sets} séries · sugerido {ex.reps} reps · {ex.rest}s</div>{ex.tech&&<div style={S.eTc}>{ex.tech}</div>}{!sk&&h.length>=2&&<div style={{fontSize:10,marginTop:6,fontWeight:600,color:p.color}}>{p.icon} {p.tip}</div>}{!sk&&lastW!==null&&lastW!==cw&&<div style={{fontSize:10,marginTop:4,fontWeight:700,color:cw>lastW?"#22c55e":"#ef4444"}}>vs último treino: {cw>lastW?"+":""}{(cw-lastW).toFixed(1).replace(/\.0$/,"")} kg (última série)</div>}</div></div>
-          {!ro&&<div style={S.eSkipRow}><button type="button" style={{...S.eSkipBt,background:sk?"#3a3348":"transparent",color:sk?"#ede9f7":"#6b7280"}} onClick={()=>toggleSkip(ex.id)}>{sk?"↩ Desfazer":"⊘ Não realizado"}</button></div>}
-          {!sk?(<><div style={S.eSetWrap}>{Array.from({length:ex.sets}).map((_,si)=>{const kgV=kgs[si]??gw(ex.id);const rpV=rps[si]??ex.reps;const done=si<(ds[ex.id]||0);return(<div key={si} style={{...S.eSetRow,opacity:done?1:0.92}}><span style={S.eSetLbl}>S{si+1}</span><input type="number" min={0} step="0.5" style={S.eSetIn} value={kgV} readOnly={!!ro} disabled={ro} onChange={e=>{const n=parseFloat(e.target.value);if(isNaN(n)||n<0)return;sSwBySet(p=>{const a=[...(p[ex.id]||[])];while(a.length<ex.sets)a.push(gw(ex.id));a[si]=n;return{...p,[ex.id]:a};});}}/><span style={S.eSetUnit}>kg</span><input type="number" min={0} step={1} style={S.eSetInR} value={rpV} readOnly={!!ro} disabled={ro} onChange={e=>{const n=parseInt(e.target.value,10);if(isNaN(n)||n<0)return;sSrBySet(p=>{const a=[...(p[ex.id]||[])];while(a.length<ex.sets)a.push(ex.reps);a[si]=n;return{...p,[ex.id]:a};});}}/><span style={S.eSetUnit}>reps</span></div>);})}</div><div style={S.eB}><div style={S.wGhost}/><div style={S.sR}>{Array.from({length:ex.sets}).map((_,si)=><div key={si} style={{...S.sD,background:sk?"#2a2535":si<(ds[ex.id]||0)?"#22c55e":"#2a2535",opacity:sk?0.35:1,cursor:sk||ro?"default":"pointer"}} onClick={()=>tick(ex.id,ex.sets,ex.rest)}/>)}<span style={S.sCtn}>{sk?"—":`${ds[ex.id]||0}/${ex.sets}`}</span></div></div></>):<div style={S.eB}><div style={S.wGhost}>—</div></div>}
-        </div>);})}
-
-      {wo.finisher&&<div style={{...S.blk,borderLeft:finisherDone?"3px solid #22c55e":"3px solid transparent"}}><div style={S.blkR} onClick={()=>setFinisherDone(!finisherDone)}><div style={{...S.chk,background:finisherDone?"#22c55e":"#2a2535"}}>{finisherDone&&"✓"}</div><div style={S.blkH}>🏃 Finalizador</div></div><div style={S.blkI}>{wo.finisher}</div></div>}
-
-      {wo.posture?.length>0&&<div style={{...S.blk,borderLeft:postDone?"3px solid #22c55e":"3px solid transparent",marginTop:8}}><div style={S.blkR} onClick={()=>setPostDone(!postDone)}><div style={{...S.chk,background:postDone?"#22c55e":"#2a2535"}}>{postDone&&"✓"}</div><button style={S.pBtn} onClick={e=>{e.stopPropagation();sSP(!sP);}}>{sP?"▾":"▸"} 🧘 Postural ({wo.posture.length})</button></div>{sP&&wo.posture.map((p,i)=><div key={i} style={S.blkI}>• {p}</div>)}</div>}
-
-      {!ro&&<><p style={S.doneHint}>A barra e “Encerrar” contam só <b>exercícios</b> (séries). Aquecimento, finalizador e postural são opcionais — os ✓ são só para te organizares.</p><button style={{...S.bp,marginTop:12,width:"100%",opacity:hasAny?1:.4}} onClick={()=>{if(hasAny)setShowFb(true);}}>{hasAny?"Encerrar treino":"Marca séries ou ‘Não realizado’"}</button>{!hasAny&&<p style={{fontSize:11,color:"#4a4260",textAlign:"center",marginTop:6}}>Pelo menos uma série num exercício, ou todos como não realizado.</p>}</>}
-      {ro&&<p style={{fontSize:12,color:"#4a4260",textAlign:"center",marginTop:22,fontStyle:"italic"}}>Somente visualização.</p>}
-    </div>
-    {modalInfo&&modalEx&&<div style={S.mdOv} onClick={()=>setExModal(null)} role="presentation"><div style={S.mdBox} onClick={e=>e.stopPropagation()}><button type="button" style={S.mdX} onClick={()=>setExModal(null)} aria-label="Fechar">✕</button><img src={modalInfo.img} alt="" style={S.mdImg} loading="lazy"/><h2 style={S.mdT}>{modalEx.name}</h2><p style={S.mdSub}>Como executar</p><ol style={S.mdOl}>{modalInfo.steps.map((st,si)=><li key={si} style={S.mdLi}>{st}</li>)}</ol></div></div>}
-  </div>);
-}
 
 function Hd({t,sub,back}){return(<div style={S.bar}><button style={S.bk} onClick={back}>←</button><div><div style={{fontSize:18,fontWeight:800}}>{t}</div>{sub&&<div style={{fontSize:11,color:"#6b6280"}}>{sub}</div>}</div></div>);}
 
 const S={
-  root:{fontFamily:"'Outfit','Figtree',system-ui,sans-serif",background:"#0c0a14",color:"#ede9f7",minHeight:"100vh",maxWidth:500,margin:"0 auto",paddingBottom:48,position:"relative"},
-  lw:{display:"flex",justifyContent:"center",alignItems:"center",height:"100vh",background:"#0c0a14"},
+  root:{fontFamily:"'Outfit','Figtree',system-ui,sans-serif",background:"var(--app-bg,#0c0a14)",color:"var(--text,#ede9f7)",minHeight:"100vh",maxWidth:500,margin:"0 auto",paddingBottom:48,position:"relative"},
+  lw:{display:"flex",justifyContent:"center",alignItems:"center",height:"100vh",background:"var(--app-bg,#0c0a14)"},
   spin:{width:36,height:36,borderRadius:"50%",border:"3px solid #2a2535",borderTopColor:"#a78bfa",animation:"spin .8s linear infinite"},
   top:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",padding:"28px 20px 10px"},
   logo:{fontSize:24,fontWeight:900,letterSpacing:8,color:"#c4b5fd",margin:0},
   date:{fontSize:12,color:"#6b6280",marginTop:4},
   dateSub:{fontSize:10,color:"#5c5475",marginTop:6,lineHeight:1.4,maxWidth:280},
-  tR:{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6},
+  tR:{display:"flex",flexDirection:"row",flexWrap:"wrap",alignItems:"center",justifyContent:"flex-end",gap:8},
   sC:{background:"linear-gradient(135deg,#f59e0b,#ef4444)",padding:"4px 12px",borderRadius:20,fontSize:13,fontWeight:800,color:"#fff"},
   badge:{background:"#16132144",padding:"5px 14px",borderRadius:20,fontSize:10,fontWeight:700,color:"#a78bfa",border:"1px solid #a78bfa15"},
   syncWarn:{margin:"0 20px 12px",padding:"12px 14px",background:"#2a1518",borderRadius:16,border:"1px solid #f59e0b44",display:"flex",gap:10,alignItems:"flex-start"},
