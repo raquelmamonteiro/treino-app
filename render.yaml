@@ -1,0 +1,15 @@
+# Static Site no Render (Vite → pasta dist).
+# New → Blueprint → liga o repo, ou cria Static Site manualmente com os mesmos comandos.
+services:
+  - type: web
+    name: treino-app
+    runtime: static
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false
