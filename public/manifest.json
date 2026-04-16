@@ -1,11 +1,11 @@
 {
-  "name": "Treino",
-  "short_name": "Treino",
-  "description": "Treinos de musculação, fila e progressão",
+  "name": "Raquel — Gestão de Vida",
+  "short_name": "Vida",
+  "description": "Painel pessoal — treino, hábitos e rotina",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0c0a14",
-  "theme_color": "#0c0a14",
+  "theme_color": "#a78bfa",
   "lang": "pt-BR",
   "icons": [
     {

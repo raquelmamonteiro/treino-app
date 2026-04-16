@@ -10,7 +10,7 @@ function sanitizeEnv(s: string | undefined): string {
     .replace(/\u200b/g, "");
 }
 
-function sanitizeUrl(raw: string): string | null {
+function sanitizeUrl(raw: string | undefined): string | null {
   let u = sanitizeEnv(raw);
   if (!u) return null;
   if (!/^https?:\/\//i.test(u)) u = `https://${u}`;

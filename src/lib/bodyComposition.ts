@@ -22,7 +22,7 @@ export function bodyFatPercentJacksonPollockFemale3(sumSkinfoldMm: number, ageYe
 /** Circunferências em cm → % gordura (fórmula Navy feminina, medições convertidas para polegadas). */
 export function bodyFatPercentNavyFemale(heightCm: number, neckCm: number, waistCm: number, hipCm: number): number | null {
   if (![heightCm, neckCm, waistCm, hipCm].every((v) => typeof v === "number" && isFinite(v) && v > 0)) return null;
-  if (waist + hip <= neck) return null;
+  if (waistCm + hipCm <= neckCm) return null;
   const hi = heightCm / 2.54;
   const ne = neckCm / 2.54;
   const wa = waistCm / 2.54;

@@ -1,3 +1,4 @@
+import type { Session } from "@supabase/supabase-js";
 import { storage } from "./storage";
 import { getSupabase, isSupabaseConfigured } from "./supabase";
 
@@ -92,10 +93,37 @@ async function upsertRemote(userId: string, payload: TreinoData): Promise<void> 
 }
 
 /**
+ * Garante sessão Supabase sem pedir e-mail: login anónimo (ativar em Authentication → Providers → Anonymous).
+ */
+async function ensureAnonymousSession(
+  sb: NonNullable<ReturnType<typeof getSupabase>>,
+): Promise<{ session: Session | null; errorNote: string | null }> {
+  const { data: first } = await sb.auth.getSession();
+  if (first.session) return { session: first.session, errorNote: null };
+
+  const { data: signed, error } = await sb.auth.signInAnonymously();
+  if (error) return { session: null, errorNote: error.message };
+  if (signed.session) return { session: signed.session, errorNote: null };
+
+  const { data: again } = await sb.auth.getSession();
+  return {
+    session: again.session ?? null,
+    errorNote: again.session ? null : "Sessão na nuvem indisponível.",
+  };
+}
+
+export type LoadTreinoStateResult = {
+  data: TreinoData;
+  session: Session | null;
+  /** Quando o Supabase está configurado mas não há sessão (ex.: login anónimo desativado no projeto). */
+  syncNote?: string;
+};
+
+/**
  * Carrega estado: local + remoto (se Supabase e sessão).
  * Conflito: vence o mais recente (meta local vs updated_at remoto).
  */
-export async function loadTreinoState(): Promise<{ data: TreinoData; session: import("@supabase/supabase-js").Session | null }> {
+export async function loadTreinoState(): Promise<LoadTreinoStateResult> {
   const local = await readLocal();
   const sb = getSupabase();
 
@@ -106,14 +134,16 @@ export async function loadTreinoState(): Promise<{ data: TreinoData; session: im
     return { data: fresh, session: null };
   }
 
-  const { data: sessionData } = await sb.auth.getSession();
-  const session = sessionData.session;
+  const { session, errorNote } = await ensureAnonymousSession(sb);
 
   if (!session) {
-    if (local.data) return { data: normalizeTreinoData(local.data), session: null };
+    const syncNote =
+      errorNote ??
+      "Não foi possível iniciar sessão na nuvem — os dados ficam só neste aparelho.";
+    if (local.data) return { data: normalizeTreinoData(local.data), session: null, syncNote };
     const fresh = initTreinoData();
     await writeLocal(fresh, Date.now());
-    return { data: fresh, session: null };
+    return { data: fresh, session: null, syncNote };
   }
 
   const { data: row, error } = await sb
